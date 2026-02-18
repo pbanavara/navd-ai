@@ -34,11 +34,24 @@ export class Memory {
     this.log = new AppendLog(config.dir);
     this.index = new EmbeddingIndex(config.dir, config.embedding.dimensions);
 
-    // The chunk starts at the current end of the log file.
-    // On a fresh start this is 0; on resume it's wherever we left off.
-    this.chunkStartOffset = this.log.position;
-    this.bytesSinceLastEmbed = 0;
-    log(`ready chunkStartOffset=${this.chunkStartOffset}`);
+    // Detect un-indexed tail: if the log has bytes beyond the last indexed chunk,
+    // a previous session crashed after appending to the log but before embedding.
+    // Set the chunk start to where the index left off so close() will backfill.
+    const lastIndexedEnd = this.index.lastIndexedEnd();
+    const logEnd = this.log.position;
+
+    if (lastIndexedEnd < logEnd) {
+      this.chunkStartOffset = lastIndexedEnd;
+      this.bytesSinceLastEmbed = logEnd - lastIndexedEnd;
+      if (lastIndexedEnd > 0) {
+        log(`recovery: found ${this.bytesSinceLastEmbed} un-indexed bytes in log (index ends at ${lastIndexedEnd}, log ends at ${logEnd})`);
+      }
+    } else {
+      this.chunkStartOffset = logEnd;
+      this.bytesSinceLastEmbed = 0;
+    }
+
+    log(`ready chunkStartOffset=${this.chunkStartOffset} bytesSinceLastEmbed=${this.bytesSinceLastEmbed}`);
   }
 
   /** Append a conversational turn and flush a chunk if the threshold is reached. */

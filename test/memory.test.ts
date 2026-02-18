@@ -192,4 +192,43 @@ describe('Memory', () => {
     // Close without appending anything - should not throw
     await mem.close();
   });
+
+  it('recovers un-indexed log tail after simulated crash', async () => {
+    // Session 1: append turns with a large chunkSize so nothing gets embedded
+    const mem1 = new Memory({
+      dir: tmpDir,
+      embedding: new MockEmbedding(),
+      chunkSize: 100_000, // very large — no auto-flush
+    });
+
+    await mem1.append({ role: 'user', text: 'Buy groceries: milk, eggs, bread' });
+    await mem1.append({ role: 'assistant', text: 'Added to your shopping list' });
+
+    // Simulate crash: close the log fd directly without flushing the chunk
+    // Access private members for the test
+    (mem1 as any).log.close();
+
+    // Session 2: re-open — should detect orphaned bytes and backfill on close
+    const mem2 = new Memory({
+      dir: tmpDir,
+      embedding: new MockEmbedding(),
+      chunkSize: 100_000,
+    });
+
+    // The orphaned bytes should be queryable after close backfills them
+    await mem2.close();
+
+    // Session 3: re-open and query — the previously orphaned turns should be indexed
+    const mem3 = new Memory({
+      dir: tmpDir,
+      embedding: new MockEmbedding(),
+      chunkSize: 100_000,
+    });
+
+    const results = await mem3.query('groceries', { topK: 1 });
+    expect(results.length).toBe(1);
+    expect(results[0].text).toContain('milk');
+
+    await mem3.close();
+  });
 });

@@ -228,6 +228,14 @@ export class EmbeddingIndex {
     return { vectors, norms, offsets, lengths };
   }
 
+  /** Return the byte offset where the last indexed chunk ends (offset + length), or 0 if empty. */
+  lastIndexedEnd(): number {
+    const { offsets, lengths } = this.readAll();
+    if (offsets.length === 0) return 0;
+    const last = offsets.length - 1;
+    return offsets[last] + lengths[last];
+  }
+
   /** Flush pending batches to disk. */
   close(): void {
     log('closing embedding index');
