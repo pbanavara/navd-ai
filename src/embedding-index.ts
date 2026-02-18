@@ -14,6 +14,9 @@ import {
   RecordBatchReader,
 } from 'apache-arrow';
 
+const log = (...args: unknown[]) => console.log('[lsm-ei:index]', ...args);
+const logError = (...args: unknown[]) => console.error('[lsm-ei:index]', ...args);
+
 export interface IndexEntry {
   vector: Float32Array;
   offset: number;
@@ -102,11 +105,13 @@ export class EmbeddingIndex {
   constructor(dir: string, dim: number) {
     this.filePath = path.join(dir, 'embeddings.arrow');
     this.schema = buildSchema(dim);
+    log(`initialized dim=${dim} file=${this.filePath}`);
   }
 
   private getSchemaSize(): number {
     if (this.cachedSchemaSize === null) {
       this.cachedSchemaSize = schemaHeaderSize(this.schema);
+      log(`computed schema header size=${this.cachedSchemaSize} bytes`);
     }
     return this.cachedSchemaSize;
   }
@@ -114,6 +119,7 @@ export class EmbeddingIndex {
   /** Buffer a new batch in memory. Call flush() or close() to persist. */
   append(entries: IndexEntry[]): void {
     if (entries.length === 0) return;
+    log(`buffering batch entries=${entries.length} pending=${this.pendingBatches.length + 1}`);
     this.pendingBatches.push(entriesToBatch(entries, this.schema));
   }
 
@@ -125,29 +131,44 @@ export class EmbeddingIndex {
    *   messages + a new EOS marker. No read-modify-write.
    */
   flush(): void {
-    if (this.pendingBatches.length === 0) return;
-
-    // Serialize the pending batches as a full stream (schema + batches + EOS)
-    const table = new Table(this.schema, this.pendingBatches);
-    const fullStream = RecordBatchStreamWriter.writeAll(table).toUint8Array(true);
-
-    if (!fs.existsSync(this.filePath)) {
-      // First write: write the complete stream
-      fs.writeFileSync(this.filePath, fullStream);
-    } else {
-      // Append: strip schema header from new bytes, truncate old EOS, append
-      const schemaSize = this.getSchemaSize();
-      const batchBytesWithEOS = fullStream.slice(schemaSize);
-
-      // Remove the old EOS marker from the existing file
-      const stat = fs.statSync(this.filePath);
-      fs.truncateSync(this.filePath, stat.size - EOS_SIZE);
-
-      // Append the new batch messages + new EOS
-      fs.appendFileSync(this.filePath, batchBytesWithEOS);
+    if (this.pendingBatches.length === 0) {
+      log('flush: nothing pending, skipping');
+      return;
     }
 
-    this.pendingBatches = [];
+    log(`flush: writing ${this.pendingBatches.length} pending batch(es)`);
+
+    try {
+      // Serialize the pending batches as a full stream (schema + batches + EOS)
+      const table = new Table(this.schema, this.pendingBatches);
+      const fullStream = RecordBatchStreamWriter.writeAll(table).toUint8Array(true);
+      log(`flush: serialized stream size=${fullStream.byteLength} bytes`);
+
+      if (!fs.existsSync(this.filePath)) {
+        // First write: write the complete stream
+        log(`flush: creating new file ${this.filePath}`);
+        fs.writeFileSync(this.filePath, fullStream);
+      } else {
+        // Append: strip schema header from new bytes, truncate old EOS, append
+        const schemaSize = this.getSchemaSize();
+        const batchBytesWithEOS = fullStream.slice(schemaSize);
+
+        // Remove the old EOS marker from the existing file
+        const stat = fs.statSync(this.filePath);
+        const newSize = stat.size - EOS_SIZE;
+        log(`flush: appending to existing file size=${stat.size} truncating to=${newSize} appending=${batchBytesWithEOS.byteLength} bytes`);
+        fs.truncateSync(this.filePath, newSize);
+
+        // Append the new batch messages + new EOS
+        fs.appendFileSync(this.filePath, batchBytesWithEOS);
+      }
+
+      this.pendingBatches = [];
+      log('flush: complete');
+    } catch (err) {
+      logError('flush failed', err);
+      throw err;
+    }
   }
 
   /** Read all entries from the Arrow IPC stream file plus any unflushed in-memory batches. */
@@ -158,23 +179,40 @@ export class EmbeddingIndex {
 
     // Read persisted batches from disk
     if (fs.existsSync(this.filePath)) {
-      const bytes = fs.readFileSync(this.filePath);
-      const reader = RecordBatchReader.from(bytes);
-      for (const batch of reader) {
-        extractBatch(batch, vectors, offsets, lengths);
+      log(`readAll: reading from ${this.filePath}`);
+      try {
+        const bytes = fs.readFileSync(this.filePath);
+        const reader = RecordBatchReader.from(bytes);
+        let diskBatches = 0;
+        for (const batch of reader) {
+          extractBatch(batch, vectors, offsets, lengths);
+          diskBatches++;
+        }
+        log(`readAll: read ${diskBatches} batch(es) ${vectors.length} vector(s) from disk`);
+      } catch (err) {
+        logError(`readAll: failed to read ${this.filePath}`, err);
+        throw err;
       }
+    } else {
+      log('readAll: no file on disk');
     }
 
     // Include unflushed in-memory batches
-    for (const batch of this.pendingBatches) {
-      extractBatch(batch, vectors, offsets, lengths);
+    if (this.pendingBatches.length > 0) {
+      const beforeCount = vectors.length;
+      for (const batch of this.pendingBatches) {
+        extractBatch(batch, vectors, offsets, lengths);
+      }
+      log(`readAll: added ${vectors.length - beforeCount} vector(s) from ${this.pendingBatches.length} in-memory batch(es)`);
     }
 
+    log(`readAll: total vectors=${vectors.length}`);
     return { vectors, offsets, lengths };
   }
 
   /** Flush pending batches to disk. */
   close(): void {
+    log('closing embedding index');
     this.flush();
   }
 }
