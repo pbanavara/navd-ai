@@ -10,8 +10,8 @@ import {
   makeData,
   RecordBatch,
   Table,
-  tableToIPC,
-  tableFromIPC,
+  RecordBatchStreamWriter,
+  RecordBatchReader,
 } from 'apache-arrow';
 
 export interface IndexEntry {
@@ -79,58 +79,120 @@ function entriesToBatch(entries: IndexEntry[], schema: Schema): RecordBatch {
   return new RecordBatch(schema, structData);
 }
 
+/** Size of the Arrow IPC stream end-of-stream marker (continuation + 0-length metadata). */
+const EOS_SIZE = 8;
+
+/**
+ * Compute the byte size of the schema header in an Arrow IPC stream.
+ * We serialize an empty table with the schema, which produces [schema_msg + EOS],
+ * then subtract the EOS marker size.
+ */
+function schemaHeaderSize(schema: Schema): number {
+  const emptyTable = new Table(schema, []);
+  const bytes = RecordBatchStreamWriter.writeAll(emptyTable).toUint8Array(true);
+  return bytes.byteLength - EOS_SIZE;
+}
+
 export class EmbeddingIndex {
   readonly filePath: string;
-  private dim: number;
+  private schema: Schema;
+  private pendingBatches: RecordBatch[] = [];
+  private cachedSchemaSize: number | null = null;
 
   constructor(dir: string, dim: number) {
     this.filePath = path.join(dir, 'embeddings.arrow');
-    this.dim = dim;
+    this.schema = buildSchema(dim);
   }
 
-  /** Append entries to the Arrow IPC file. */
+  private getSchemaSize(): number {
+    if (this.cachedSchemaSize === null) {
+      this.cachedSchemaSize = schemaHeaderSize(this.schema);
+    }
+    return this.cachedSchemaSize;
+  }
+
+  /** Buffer a new batch in memory. Call flush() or close() to persist. */
   append(entries: IndexEntry[]): void {
     if (entries.length === 0) return;
-
-    const schema = buildSchema(this.dim);
-    const newBatch = entriesToBatch(entries, schema);
-    const newTable = new Table(schema, [newBatch]);
-
-    let merged: Table;
-    if (fs.existsSync(this.filePath)) {
-      const existing = tableFromIPC(fs.readFileSync(this.filePath));
-      merged = existing.concat(newTable);
-    } else {
-      merged = newTable;
-    }
-
-    fs.writeFileSync(this.filePath, tableToIPC(merged, 'file'));
+    this.pendingBatches.push(entriesToBatch(entries, this.schema));
   }
 
-  /** Read all entries from the Arrow IPC file. */
-  readAll(): IndexData {
+  /**
+   * Flush pending batches to the Arrow IPC stream file.
+   *
+   * - If the file doesn't exist: writes a complete stream (schema + batches + EOS).
+   * - If the file exists: truncates the EOS marker, appends only the new batch
+   *   messages + a new EOS marker. No read-modify-write.
+   */
+  flush(): void {
+    if (this.pendingBatches.length === 0) return;
+
+    // Serialize the pending batches as a full stream (schema + batches + EOS)
+    const table = new Table(this.schema, this.pendingBatches);
+    const fullStream = RecordBatchStreamWriter.writeAll(table).toUint8Array(true);
+
     if (!fs.existsSync(this.filePath)) {
-      return { vectors: [], offsets: [], lengths: [] };
+      // First write: write the complete stream
+      fs.writeFileSync(this.filePath, fullStream);
+    } else {
+      // Append: strip schema header from new bytes, truncate old EOS, append
+      const schemaSize = this.getSchemaSize();
+      const batchBytesWithEOS = fullStream.slice(schemaSize);
+
+      // Remove the old EOS marker from the existing file
+      const stat = fs.statSync(this.filePath);
+      fs.truncateSync(this.filePath, stat.size - EOS_SIZE);
+
+      // Append the new batch messages + new EOS
+      fs.appendFileSync(this.filePath, batchBytesWithEOS);
     }
 
-    const table = tableFromIPC(fs.readFileSync(this.filePath));
-    const numRows = table.numRows;
+    this.pendingBatches = [];
+  }
 
-    const vectorCol = table.getChild('vector')!;
-    const offsetCol = table.getChild('offset')!;
-    const lengthCol = table.getChild('length')!;
-
+  /** Read all entries from the Arrow IPC stream file plus any unflushed in-memory batches. */
+  readAll(): IndexData {
     const vectors: Float32Array[] = [];
     const offsets: number[] = [];
     const lengths: number[] = [];
 
-    for (let i = 0; i < numRows; i++) {
-      const inner = vectorCol.get(i)!;
-      vectors.push(new Float32Array(inner.toArray() as Float32Array));
-      offsets.push(Number(offsetCol.get(i) as bigint));
-      lengths.push(Number(lengthCol.get(i) as bigint));
+    // Read persisted batches from disk
+    if (fs.existsSync(this.filePath)) {
+      const bytes = fs.readFileSync(this.filePath);
+      const reader = RecordBatchReader.from(bytes);
+      for (const batch of reader) {
+        extractBatch(batch, vectors, offsets, lengths);
+      }
+    }
+
+    // Include unflushed in-memory batches
+    for (const batch of this.pendingBatches) {
+      extractBatch(batch, vectors, offsets, lengths);
     }
 
     return { vectors, offsets, lengths };
+  }
+
+  /** Flush pending batches to disk. */
+  close(): void {
+    this.flush();
+  }
+}
+
+function extractBatch(
+  batch: RecordBatch,
+  vectors: Float32Array[],
+  offsets: number[],
+  lengths: number[],
+): void {
+  const vectorCol = batch.getChild('vector')!;
+  const offsetCol = batch.getChild('offset')!;
+  const lengthCol = batch.getChild('length')!;
+
+  for (let i = 0; i < batch.numRows; i++) {
+    const inner = vectorCol.get(i)!;
+    vectors.push(new Float32Array(inner.toArray() as Float32Array));
+    offsets.push(Number(offsetCol.get(i) as bigint));
+    lengths.push(Number(lengthCol.get(i) as bigint));
   }
 }

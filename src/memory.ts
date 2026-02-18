@@ -1,4 +1,4 @@
-import * as fs from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { AppendLog } from './log.js';
 import { EmbeddingIndex } from './embedding-index.js';
 import { topKSimilarity } from './similarity.js';
@@ -18,7 +18,7 @@ export class Memory {
   private bytesSinceLastEmbed: number;
 
   constructor(config: MemoryConfig) {
-    fs.mkdirSync(config.dir, { recursive: true });
+    mkdirSync(config.dir, { recursive: true });
 
     this.embedding = config.embedding;
     this.chunkSize = config.chunkSize ?? DEFAULT_CHUNK_SIZE;
@@ -65,6 +65,7 @@ export class Memory {
     if (this.bytesSinceLastEmbed > 0) {
       await this.flushChunk();
     }
+    this.index.close();
     this.log.close();
   }
 
