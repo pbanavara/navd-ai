@@ -25,7 +25,7 @@ No LLM summarization. No compaction. No information loss.
 1. Incoming query → embed the query text
 2. Cosine similarity over vectors in `embeddings.arrow` (brute-force dot product)
 3. Top-k results → each gives a `(file_offset, length)` pointer
-4. Memory-map `conversations.log` → seek to offset → read `length` bytes
+4. Seek to offset in `conversations.log` → read `length` bytes
 5. Inject retrieved chunks into the LLM context as memory
 
 ## Storage Format
@@ -52,7 +52,7 @@ Apache Arrow file with three columns:
 | offset     | uint64        | Byte offset into conversations.log       |
 | length     | uint32        | Byte length of the chunk                 |
 
-Memory-mapped. OS page cache keeps hot data in RAM.
+v1 uses `readFileSync` (full copy into Node.js heap). At personal-agent scale (~8MB per user) this is fine. A future version could use mmap via a native addon (e.g. `mmap-io`) for true zero-copy reads and OS page cache benefits.
 
 ## Why No Compaction
 
@@ -81,7 +81,7 @@ A standalone vector DB becomes relevant at millions of vectors. For single-user 
 1. **Append-only** — never mutate historical data
 2. **Embeddings are an index, not storage** — the log is the source of truth
 3. **No LLM in the storage path** — only the embedding model touches writes
-4. **Memory-mapped I/O** — let the OS handle caching
+4. **Minimal I/O** — v1 uses positioned reads; mmap is a future optimization
 5. **Lazy retrieval** — only fetch chunks when a query needs them
 6. **File pointers as values** — embedding maps to (offset, length), not to copied content
 
@@ -100,4 +100,4 @@ A standalone vector DB becomes relevant at millions of vectors. For single-user 
 | Arrow file size at 50k vectors (1536D) | ~300MB |
 | Brute-force search time at 50k vectors | < 10ms |
 | Log file size at 50k chunks of 10KB | ~500MB |
-| mmap read latency (cached) | microseconds |
+| Log read latency (positioned read) | microseconds |

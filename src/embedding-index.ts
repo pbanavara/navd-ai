@@ -177,7 +177,11 @@ export class EmbeddingIndex {
     const offsets: number[] = [];
     const lengths: number[] = [];
 
-    // Read persisted batches from disk
+    // Read persisted batches from disk.
+    // v1 simplification: readFileSync copies the file into a Node.js Buffer.
+    // The design doc mentions mmap for zero-copy reads — at personal-agent scale
+    // (~8MB per user) this doesn't matter, but for larger deployments a native
+    // mmap addon (e.g. mmap-io) would avoid the copy.
     if (fs.existsSync(this.filePath)) {
       log(`readAll: reading from ${this.filePath}`);
       try {
