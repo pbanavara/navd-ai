@@ -1,10 +1,12 @@
 /**
  * Compute cosine similarity between a query vector and a matrix of stored vectors.
+ * Uses pre-computed norms for stored vectors to avoid redundant computation.
  * Returns an array of { index, score } sorted descending by score, limited to topK.
  */
 export function topKSimilarity(
   query: Float32Array,
   vectors: Float32Array[],
+  norms: number[],
   topK: number,
 ): Array<{ index: number; score: number }> {
   const results: Array<{ index: number; score: number }> = [];
@@ -13,10 +15,10 @@ export function topKSimilarity(
   if (queryNorm === 0) return [];
 
   for (let i = 0; i < vectors.length; i++) {
-    const v = vectors[i];
-    const vNorm = norm(v);
+    const vNorm = norms[i];
     if (vNorm === 0) continue;
 
+    const v = vectors[i];
     let dot = 0;
     for (let j = 0; j < query.length; j++) {
       dot += query[j] * v[j];

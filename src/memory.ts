@@ -68,14 +68,14 @@ export class Memory {
       throw err;
     }
 
-    const { vectors, offsets, lengths } = this.index.readAll();
+    const { vectors, norms, offsets, lengths } = this.index.readAll();
 
     if (vectors.length === 0) {
       log('query: no indexed vectors, returning empty');
       return [];
     }
 
-    const hits = topKSimilarity(queryVec, vectors, topK);
+    const hits = topKSimilarity(queryVec, vectors, norms, topK);
     log(`query: found ${hits.length} hit(s) topScore=${hits.length > 0 ? hits[0].score.toFixed(4) : 'n/a'}`);
 
     return hits.map((h) => ({

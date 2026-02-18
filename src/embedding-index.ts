@@ -5,6 +5,7 @@ import {
   Field,
   FixedSizeList,
   Float32,
+  Float64,
   Int64,
   Struct,
   makeData,
@@ -25,6 +26,7 @@ export interface IndexEntry {
 
 export interface IndexData {
   vectors: Float32Array[];
+  norms: number[];
   offsets: number[];
   lengths: number[];
 }
@@ -36,6 +38,7 @@ function buildSchema(dim: number): Schema {
       new FixedSizeList(dim, new Field('value', new Float32(), false)),
       false,
     ),
+    new Field('norm', new Float64(), false),
     new Field('offset', new Int64(), false),
     new Field('length', new Int64(), false),
   ]);
@@ -62,6 +65,15 @@ function entriesToBatch(entries: IndexEntry[], schema: Schema): RecordBatch {
     child: childData,
   });
 
+  // Pre-compute L2 norms at write time so queries only need dot product + divide
+  const normValues = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let sum = 0;
+    const vec = entries[i].vector;
+    for (let j = 0; j < vec.length; j++) sum += vec[j] * vec[j];
+    normValues[i] = Math.sqrt(sum);
+  }
+
   const offsetValues = new BigInt64Array(n);
   const lengthValues = new BigInt64Array(n);
   for (let i = 0; i < n; i++) {
@@ -69,6 +81,7 @@ function entriesToBatch(entries: IndexEntry[], schema: Schema): RecordBatch {
     lengthValues[i] = BigInt(entries[i].length);
   }
 
+  const normData = makeData({ type: new Float64(), length: n, data: normValues });
   const offsetData = makeData({ type: new Int64(), length: n, data: offsetValues });
   const lengthData = makeData({ type: new Int64(), length: n, data: lengthValues });
 
@@ -76,7 +89,7 @@ function entriesToBatch(entries: IndexEntry[], schema: Schema): RecordBatch {
   const structData = makeData({
     type: structType,
     length: n,
-    children: [vectorData, offsetData, lengthData],
+    children: [vectorData, normData, offsetData, lengthData],
   });
 
   return new RecordBatch(schema, structData);
@@ -174,6 +187,7 @@ export class EmbeddingIndex {
   /** Read all entries from the Arrow IPC stream file plus any unflushed in-memory batches. */
   readAll(): IndexData {
     const vectors: Float32Array[] = [];
+    const norms: number[] = [];
     const offsets: number[] = [];
     const lengths: number[] = [];
 
@@ -189,7 +203,7 @@ export class EmbeddingIndex {
         const reader = RecordBatchReader.from(bytes);
         let diskBatches = 0;
         for (const batch of reader) {
-          extractBatch(batch, vectors, offsets, lengths);
+          extractBatch(batch, vectors, norms, offsets, lengths);
           diskBatches++;
         }
         log(`readAll: read ${diskBatches} batch(es) ${vectors.length} vector(s) from disk`);
@@ -205,13 +219,13 @@ export class EmbeddingIndex {
     if (this.pendingBatches.length > 0) {
       const beforeCount = vectors.length;
       for (const batch of this.pendingBatches) {
-        extractBatch(batch, vectors, offsets, lengths);
+        extractBatch(batch, vectors, norms, offsets, lengths);
       }
       log(`readAll: added ${vectors.length - beforeCount} vector(s) from ${this.pendingBatches.length} in-memory batch(es)`);
     }
 
     log(`readAll: total vectors=${vectors.length}`);
-    return { vectors, offsets, lengths };
+    return { vectors, norms, offsets, lengths };
   }
 
   /** Flush pending batches to disk. */
@@ -224,16 +238,19 @@ export class EmbeddingIndex {
 function extractBatch(
   batch: RecordBatch,
   vectors: Float32Array[],
+  norms: number[],
   offsets: number[],
   lengths: number[],
 ): void {
   const vectorCol = batch.getChild('vector')!;
+  const normCol = batch.getChild('norm')!;
   const offsetCol = batch.getChild('offset')!;
   const lengthCol = batch.getChild('length')!;
 
   for (let i = 0; i < batch.numRows; i++) {
     const inner = vectorCol.get(i)!;
     vectors.push(new Float32Array(inner.toArray() as Float32Array));
+    norms.push(normCol.get(i) as number);
     offsets.push(Number(offsetCol.get(i) as bigint));
     lengths.push(Number(lengthCol.get(i) as bigint));
   }
