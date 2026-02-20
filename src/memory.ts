@@ -127,6 +127,7 @@ export class Memory {
     }
 
     this.index.append([{ vector, offset, length }]);
+    this.index.flush();
 
     this.chunkStartOffset = this.log.position;
     this.bytesSinceLastEmbed = 0;

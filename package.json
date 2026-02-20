@@ -1,6 +1,6 @@
 {
   "name": "navd-ai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "NAVD: Persistent conversational memory for AI agents. Two files, zero databases, pluggable embeddings.",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,14 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./openai": {
+      "import": "./dist/embeddings/openai.js",
+      "types": "./dist/embeddings/openai.d.ts"
+    },
+    "./local": {
+      "import": "./dist/embeddings/local.js",
+      "types": "./dist/embeddings/local.d.ts"
     }
   },
   "files": [
