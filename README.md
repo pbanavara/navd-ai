@@ -1,4 +1,4 @@
-# NAVD: Persistent conversation store for AI agents. 2 files, Not a vector database.
+# NAVD: Persistent conversation store for AI agents. Not a vector database.
 
 Persistent conversational memory for AI agents. Two files, zero databases, pluggable embeddings.
 
