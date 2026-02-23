@@ -7,7 +7,7 @@ Raw conversations are the source of truth. Embeddings serve as a spatial index o
 ## Install
 
 ```bash
-npm install navd-ei
+npm install navd-ai
 ```
 
 Then install **at least one** embedding provider:
